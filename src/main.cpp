@@ -2,13 +2,27 @@
 #include <SPI.h>
 #include "Ucglib.h"
 
-#define SERVO_PIN 3 // Servo Signal->D3
-#define ECHO_PIN 5  // Ultrasonic Module Echo->D5
-#define TRIG_PIN 6  // Ultrasonic Module Trig->D6
-#define RESET_PIN 8 // TFT Module RESET->D8
-#define AO_PIN 9    // TFT Module AO->D9
-#define CS_PIN 10   // TFT Module CS->D10
+#define SERVO_PIN 3
+#define ECHO_PIN 5
+#define TRIG_PIN 6
+#define RESET_PIN 8
+#define AO_PIN 9
+#define CS_PIN 10
+#define BUTTON_PIN 7
 #define BAUD 115200
+
+// Function prototypes
+void ClearScreen();
+void DrawRadarCurves();
+void DrawRadarRanges();
+void DrawDegreeGraduations();
+void DrawDistanceMarkers();
+int GetDistance();
+void DisplayStartMessage();
+void DisplayRadarScreen();
+void PerformScan();
+void MoveRadar(int direction);
+void SetDefaultPosition();
 
 int ScreenHeight = 128;
 int ScreenWidth = 160;
@@ -19,18 +33,10 @@ int ScanLength = 105;
 Servo BaseServo;
 Ucglib_ST7735_18x128x160_HWSPI ucg(AO_PIN, CS_PIN, RESET_PIN);
 
-const int maxDataPoints = 91; // Store 0° to 90° (every 2°)
-int angles[maxDataPoints];
-int distances[maxDataPoints];
-int dataIndex = 0;
-
-// Function declarations
-void displayStartupScreen();
-void ClearScreen();
-int GetDistance();
-void DrawRadarCurves();
-void DrawRadarRanges();
-void LogScannedData();
+bool scanning = false;
+int currentAngle = 90; // Start at center position
+int moveDirection = 0; // 0: stop, -1: left, 1: right
+const int DEFAULT_ANGLE = 90;
 
 void setup()
 {
@@ -38,37 +44,182 @@ void setup()
   ucg.setRotate90();
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
-  Serial.begin(BAUD);
-
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
   BaseServo.attach(SERVO_PIN);
-  BaseServo.write(90); // Start at 0° position (center/front)
+  SetDefaultPosition();
 
-  displayStartupScreen();
-  ClearScreen();
+  Serial.begin(BAUD);
+  Serial.println("Arduino Radar initialized");
 
-  ucg.setFont(ucg_font_orgv01_hr);
-  ucg.setFontMode(UCG_FONT_MODE_SOLID);
+  DisplayStartMessage();
 }
 
-void displayStartupScreen()
+void loop()
 {
-  ucg.setFontMode(UCG_FONT_MODE_TRANSPARENT);
-  ucg.setColor(0, 0, 100, 0);
-  ucg.drawGradientBox(0, 0, 160, 128);
+  if (Serial.available())
+  {
+    char command = Serial.read();
+    Serial.print("Received command: ");
+    Serial.println(command);
+
+    switch (command)
+    {
+    case 'S':
+      Serial.println("Starting scan...");
+      scanning = true;
+      SetDefaultPosition();
+      DisplayRadarScreen();
+      break;
+    case 'T':
+      Serial.println("Stopping scan...");
+      scanning = false;
+      moveDirection = 0;
+      SetDefaultPosition();
+      DisplayStartMessage();
+      break;
+    case 'L':
+      moveDirection = -1;
+      break;
+    case 'R':
+      moveDirection = 1;
+      break;
+    case 'M':
+      moveDirection = 0;
+      break;
+    default:
+      Serial.println("Unknown command");
+      break;
+    }
+  }
+
+  if (scanning)
+  {
+    PerformScan();
+  }
+}
+
+void PerformScan()
+{
+  int distance = GetDistance();
+  
+  // Convert currentAngle to React app angle
+  int reactAngle;
+  if (currentAngle <= 90) {
+    reactAngle = 90 - currentAngle;
+  } else {
+    reactAngle = 450 - currentAngle;
+  }
+  
+  Serial.print("Angle: ");
+  Serial.print(reactAngle);
+  Serial.print(" Distance: ");
+  Serial.println(distance);
+
+  int x = CenterX + ScanLength * cos(radians(currentAngle));
+  int y = BasePosition - ScanLength * sin(radians(currentAngle));
+
+  // Draw radar sweep line
   ucg.setColor(0, 255, 0);
-  ucg.setPrintPos(25, 40);
-  ucg.setFont(ucg_font_logisoso18_tf);
-  ucg.print("Z.I.L.G.A.M.R");
-  ucg.setFont(ucg_font_helvB08_tf);
-  ucg.setPrintPos(40, 100);
-  ucg.print("Testing . . . OK");
-  delay(2000);
+  ucg.drawLine(CenterX, BasePosition, x, y);
+  delay(20);
+  ucg.setColor(0, 0, 0);
+  ucg.drawLine(CenterX, BasePosition, x, y);
+
+  // Draw detected object
+  if (distance < 100)
+  {
+    ucg.setColor(255, 0, 0);
+    int pointX = CenterX + 1.15 * distance * cos(radians(currentAngle));
+    int pointY = BasePosition - 1.15 * distance * sin(radians(currentAngle));
+    ucg.drawDisc(pointX, pointY, 2, UCG_DRAW_ALL);
+  }
+
+  MoveRadar(moveDirection);
+}
+
+void MoveRadar(int direction)
+{
+  currentAngle += direction;
+  currentAngle = constrain(currentAngle, 0, 180);
+  BaseServo.write(currentAngle);
+  delay(15); // Small delay for smooth movement
+}
+
+void SetDefaultPosition()
+{
+  currentAngle = DEFAULT_ANGLE;
+  BaseServo.write(currentAngle);
+  delay(500); // Wait for servo to reach position
 }
 
 void ClearScreen()
 {
-  ucg.setColor(0, 0, 0, 0);
   ucg.clearScreen();
+}
+
+void DrawRadarCurves()
+{
+  ucg.setColor(0, 64, 0);  // Darker green for the background circles
+  for (int i = 1; i <= 4; i++)
+  {
+    int radius = ScanLength * i / 4;
+    ucg.drawCircle(CenterX, BasePosition, radius, UCG_DRAW_UPPER_RIGHT | UCG_DRAW_UPPER_LEFT);
+    // Draw vertical lines to complete the half-circle effect
+    ucg.drawLine(CenterX - radius, BasePosition, CenterX - radius, BasePosition - 1);
+    ucg.drawLine(CenterX + radius, BasePosition, CenterX + radius, BasePosition - 1);
+  }
+  
+  // Draw the main circle with a brighter green
+  ucg.setColor(0, 255, 0);
+  ucg.drawCircle(CenterX, BasePosition, ScanLength, UCG_DRAW_UPPER_RIGHT | UCG_DRAW_UPPER_LEFT);
+  ucg.drawLine(CenterX - ScanLength, BasePosition, CenterX - ScanLength, BasePosition - 1);
+  ucg.drawLine(CenterX + ScanLength, BasePosition, CenterX + ScanLength, BasePosition - 1);
+}
+
+void DrawRadarRanges()
+{
+  ucg.drawLine(0, BasePosition, ScreenWidth, BasePosition);
+  ucg.drawLine(CenterX, BasePosition - ScanLength, CenterX, BasePosition);
+}
+
+void DrawDegreeGraduations()
+{
+  ucg.setFont(ucg_font_ncenR08_hr);
+  ucg.setColor(0, 255, 0);
+  
+  for (int angle = 0; angle <= 180; angle += 30)
+  {
+    float radAngle = radians(angle);
+    int x1 = CenterX + (ScanLength - 5) * cos(radAngle);
+    int y1 = BasePosition - (ScanLength - 5) * sin(radAngle);
+    int x2 = CenterX + (ScanLength + 5) * cos(radAngle);
+    int y2 = BasePosition - (ScanLength + 5) * sin(radAngle);
+    
+    ucg.drawLine(x1, y1, x2, y2);
+    
+    char degreeStr[5];
+    sprintf(degreeStr, "%d°", angle);
+    int textX = CenterX + (ScanLength + 15) * cos(radAngle);
+    int textY = BasePosition - (ScanLength + 15) * sin(radAngle);
+    ucg.setPrintPos(textX - ucg.getStrWidth(degreeStr) / 2, textY);
+    ucg.print(degreeStr);
+  }
+}
+
+void DrawDistanceMarkers()
+{
+  ucg.setFont(ucg_font_ncenR08_hr);
+  ucg.setColor(0, 128, 0);  // Medium green for distance markers
+  
+  for (int dist = 25; dist <= 100; dist += 25)
+  {
+    int radius = ScanLength * dist / 100;
+    char distStr[10];
+    sprintf(distStr, "%d", dist);
+    int textWidth = ucg.getStrWidth(distStr);
+    ucg.setPrintPos(CenterX - textWidth / 2, BasePosition - radius - 5);
+    ucg.print(distStr);
+  }
 }
 
 int GetDistance()
@@ -78,95 +229,41 @@ int GetDistance()
   digitalWrite(TRIG_PIN, HIGH);
   delayMicroseconds(10);
   digitalWrite(TRIG_PIN, LOW);
-
+  
   long duration = pulseIn(ECHO_PIN, HIGH);
-  if (duration == 0)
-    return 999;                // No valid response
-  return duration * 0.034 / 2; // Convert to cm
+  int distance = duration * 0.034 / 2;
+  return distance;
 }
 
-void DrawRadarCurves()
-{
-  ucg.setColor(0, 40, 0);
-  ucg.drawDisc(CenterX, BasePosition, 3, UCG_DRAW_ALL);
-  for (int r = 29; r <= 115; r += 29)
-  {
-    ucg.drawCircle(CenterX, BasePosition, r, UCG_DRAW_UPPER_LEFT);
-    ucg.drawCircle(CenterX, BasePosition, r, UCG_DRAW_UPPER_RIGHT);
-  }
-  ucg.drawLine(0, BasePosition, ScreenWidth, BasePosition);
-}
-
-void DrawRadarRanges()
-{
-  ucg.setColor(0, 180, 0);
-  ucg.setPrintPos(CenterX - 10, ScreenHeight - 113);
-  ucg.print("100cm");
-  ucg.setPrintPos(CenterX - 10, ScreenHeight - 96);
-  ucg.print("75cm");
-  ucg.setPrintPos(CenterX - 10, ScreenHeight - 68);
-  ucg.print("50cm");
-  ucg.setPrintPos(CenterX - 10, ScreenHeight - 39);
-  ucg.print("25cm");
-}
-
-void LogScannedData()
+void DisplayStartMessage()
 {
   ClearScreen();
+  
+  // Display "Arduino Uno" in green
+  ucg.setFont(ucg_font_ncenR08_hr);
   ucg.setColor(0, 255, 0);
-  ucg.setFont(ucg_font_helvB08_tf);
-  ucg.setPrintPos(10, 20);
-  ucg.print("Scanned Data:");
-
-  // Send scanned data to the serial port for Node.js
-  for (int i = 0; i < dataIndex; i++)
-  {
-    String logData = String("Angle: ") + angles[i] + " Dist: " + distances[i];
-    Serial.println(logData); // Send data to Serial
-  }
+  ucg.setPrintPos(ScreenWidth / 2 - ucg.getStrWidth("Arduino Uno") / 2, 40);
+  ucg.print("Arduino Uno");
+  
+  // Display "Ultrasonic Sensor" in green with larger font
+  ucg.setFont(ucg_font_ncenR12_hr);
+  ucg.setColor(0, 255, 0);
+  ucg.setPrintPos(ScreenWidth / 2 - ucg.getStrWidth("Ultrasonic Sensor") / 2, 65);
+  ucg.print("Ultrasonic Sensor");
+  
+  // Display "Press Start Button" in white with the same font as "Arduino Uno"
+  ucg.setFont(ucg_font_ncenR08_hr);
+  ucg.setColor(255, 255, 255);
+  ucg.setPrintPos(ScreenWidth / 2 - ucg.getStrWidth("Press Start Button") / 2, 90);
+  ucg.print("Press Start Button");
 }
 
-void loop()
+void DisplayRadarScreen()
 {
+  ClearScreen();
   DrawRadarCurves();
   DrawRadarRanges();
-
-  // Sweep from -180° to 90° (with center at 0°)
-  for (int angle = -180; angle <= 90; angle += 2)
-  {
-    int servoAngle = map(angle, -180, 90, 0, 180); // Map -180° to 90° into servo range 0° to 180°
-    BaseServo.write(servoAngle);
-    delay(30);
-
-    int distance = GetDistance();
-    int x = CenterX + ScanLength * cos(radians(angle));
-    int y = BasePosition - ScanLength * sin(radians(angle));
-
-    // Draw radar sweep line
-    ucg.setColor(0, 255, 0);
-    ucg.drawLine(CenterX, BasePosition, x, y);
-    delay(20);
-    ucg.setColor(0, 0, 0);
-    ucg.drawLine(CenterX, BasePosition, x, y);
-
-    // Draw detected object
-    if (distance < 100)
-    {
-      ucg.setColor(255, 0, 0);
-      int pointX = CenterX + 1.15 * distance * cos(radians(angle));
-      int pointY = BasePosition - 1.15 * distance * sin(radians(angle));
-      ucg.drawDisc(pointX, pointY, 2, UCG_DRAW_ALL);
-    }
-
-    // Save scanned data
-    if (dataIndex < maxDataPoints)
-    {
-      angles[dataIndex] = angle;
-      distances[dataIndex] = distance;
-      dataIndex++;
-    }
-  }
-
-  LogScannedData(); // Display and log the scanned data
-  delay(1000);      // Pause between scans
+  DrawDegreeGraduations();
+  DrawDistanceMarkers();
 }
+
